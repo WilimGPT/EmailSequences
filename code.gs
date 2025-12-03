@@ -159,3 +159,95 @@ function hasRepliedSinceLastSend(email, lastSent) {
   console.log(`No replies found for ${email} since ${last.toISOString()}.`);
   return false;
 }
+
+function sendDailySummaryAndArchive() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const contactsSheet = ss.getSheetByName("Contacts");
+  const historySheet = ss.getSheetByName("History");
+
+  const data = contactsSheet.getDataRange().getValues();
+  if (data.length <= 1) {
+    console.log("No data rows in Contacts. Nothing to archive.");
+    return;
+  }
+
+  const headers = data[0];
+  const now = new Date();
+  const timezone = Session.getScriptTimeZone();
+  const dateLabel = Utilities.formatDate(now, timezone, "yyyy-MM-dd");
+
+  console.log("=== sendDailySummaryAndArchive for " + dateLabel + " ===");
+
+  // Ensure History has headers (once)
+  if (historySheet.getLastRow() === 0) {
+    const historyHeaders = headers.concat(["ClosedAt"]);
+    historySheet.appendRow(historyHeaders);
+    console.log("Initialized History sheet headers.");
+  }
+
+  const rowsToArchive = [];
+  const rowIndexesToDelete = [];
+
+  // Scan Contacts for Completed / Replied
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const status = row[5]; // Status column F
+
+    if (status === "Completed" || status === "Replied") {
+      rowsToArchive.push(row.concat([now])); // add ClosedAt
+      rowIndexesToDelete.push(i + 1);        // sheet row index
+    }
+  }
+
+  if (rowsToArchive.length === 0) {
+    console.log("No Completed/Replied rows to archive today.");
+    return; // nothing to email, nothing to move
+  }
+
+  // Append to History
+  const startRow = historySheet.getLastRow() + 1;
+  historySheet
+    .getRange(startRow, 1, rowsToArchive.length, rowsToArchive[0].length)
+    .setValues(rowsToArchive);
+
+  console.log("Archived " + rowsToArchive.length + " row(s) to History.");
+
+  // Build summary email
+  const userEmail = Session.getActiveUser().getEmail();
+  let body = "";
+  body += "Daily sequence summary for " + dateLabel + "\n\n";
+  body += "The following contacts finished or replied and were moved to the History sheet:\n\n";
+
+  rowsToArchive.forEach((r, idx) => {
+    const email = r[0];
+    const firstName = r[1];
+    const sequenceName = r[2];
+    const step = r[3];
+    const lastSent = r[4];
+    const status = r[5];
+    const closedAt = r[7];
+
+    body +=
+      (idx + 1) + ". " +
+      `Name: ${firstName}\n` +
+      `   Email: ${email}\n` +
+      `   Sequence: ${sequenceName}\n` +
+      `   Last Step: ${step}\n` +
+      `   Status: ${status}\n` +
+      `   LastSent: ${lastSent}\n` +
+      `   ClosedAt: ${closedAt}\n\n`;
+  });
+
+  const subject = "Daily sequence summary (" + dateLabel + ")";
+  GmailApp.sendEmail(userEmail, subject, body);
+  console.log("Sent summary email to " + userEmail);
+
+  // Delete from Contacts (bottom-up to avoid index shift)
+  rowIndexesToDelete.sort((a, b) => b - a).forEach(rowIndex => {
+    contactsSheet.deleteRow(rowIndex);
+  });
+
+  console.log("Deleted " + rowIndexesToDelete.length + " row(s) from Contacts.");
+  console.log("=== sendDailySummaryAndArchive finished ===");
+}
+
