@@ -20,6 +20,7 @@ function runSequences() {
     const step = row[3];
     const lastSent = row[4];
     const status = row[5];
+    const threadId = row[6]; // ✅ New column
 
     if (!email || !sequenceName || !step) continue;
     if (status !== "Active") continue;
@@ -30,9 +31,10 @@ function runSequences() {
 
     if (!sequenceRow) continue;
 
-    const delayMin = Number(sequenceRow[3]); // DelayMin (source of truth)
+    const delayMin = Number(sequenceRow[3]); // DelayMin
     const subjectTemplate = sequenceRow[4];
     const bodyTemplate = sequenceRow[5];
+    const replyInThread = sequenceRow[6] === true; // ✅ Checkbox
 
     if (lastSent) {
       const last = new Date(lastSent);
@@ -40,7 +42,8 @@ function runSequences() {
       if (diffMin < delayMin) continue;
     }
 
-    if (hasReplied(email)) {
+    // ✅ Check for reply ONLY on the stored most recent thread
+    if (threadId && hasRepliedToThread(threadId)) {
       contactsSheet.getRange(i + 1, 6).setValue("Replied");
       continue;
     }
@@ -50,16 +53,44 @@ function runSequences() {
       bodyTemplate.replace(/{{name}}/g, firstName) +
       signatureHTML;
 
-    GmailApp.sendEmail(email, subject, "", {
-      htmlBody: body
-    });
+    let sentThreadId = null;
 
-    contactsSheet.getRange(i + 1, 4).setValue(step + 1);   // Advance step
-    contactsSheet.getRange(i + 1, 5).setValue(new Date()); // Update LastSent
+    // ✅ Send as reply in-thread
+    if (replyInThread && threadId) {
+      const thread = GmailApp.getThreadById(threadId);
+      thread.reply("", {
+        htmlBody: body,
+        subject: subject
+      });
+      sentThreadId = threadId;
+    } 
+    // ✅ Send as brand new thread
+    else {
+      const message = GmailApp.sendEmail(email, subject, "", {
+        htmlBody: body
+      });
+      sentThreadId = message.getThreadId(); // ✅ Capture new thread
+    }
+
+    // ✅ Persist latest thread
+    contactsSheet.getRange(i + 1, 7).setValue(sentThreadId);
+
+    // ✅ Advance step + timestamp
+    contactsSheet.getRange(i + 1, 4).setValue(step + 1);
+    contactsSheet.getRange(i + 1, 5).setValue(new Date());
   }
 }
 
-function hasReplied(email) {
-  const threads = GmailApp.search(`from:${email}`);
-  return threads.length > 0;
+// ✅ Only checks for replies inside ONE specific thread
+function hasRepliedToThread(threadId) {
+  const thread = GmailApp.getThreadById(threadId);
+  const messages = thread.getMessages();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg.isDraft() && msg.isInInbox() && msg.getFrom()) {
+      return true; // ✅ A reply exists
+    }
+  }
+  return false;
 }
