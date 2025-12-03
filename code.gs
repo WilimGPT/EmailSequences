@@ -20,8 +20,7 @@ function runSequences() {
     const step = row[3];
     const lastSent = row[4];
     const status = row[5];
-    const threadId = row[6];
-    const startAfter = row[7]; // ✅ NEW
+    const startAfter = row[6]; // ⬅️ Now column G after removing ThreadId
 
     if (!email || !sequenceName || !step) continue;
     if (status !== "Active") continue;
@@ -35,7 +34,11 @@ function runSequences() {
       r => r[0] === sequenceName && r[1] === step
     );
 
-    if (!sequenceRow) continue;
+    // ✅ NO MORE STEPS = COMPLETED (we’ll wire notification later, as discussed)
+    if (!sequenceRow) {
+      contactsSheet.getRange(i + 1, 6).setValue("Completed");
+      continue;
+    }
 
     const delayMin = Number(sequenceRow[3]);
     const subjectTemplate = sequenceRow[4];
@@ -49,8 +52,8 @@ function runSequences() {
       if (diffMin < delayMin) continue;
     }
 
-    // ✅ Reply detection ONLY on the latest thread
-    if (threadId && hasRepliedToThread(threadId)) {
+    // ✅ SAFE REPLY DETECTION: ANY email since LastSent stops the sequence
+    if (hasRepliedSinceLastSend(email, lastSent)) {
       contactsSheet.getRange(i + 1, 6).setValue("Replied");
       continue;
     }
@@ -60,27 +63,16 @@ function runSequences() {
       bodyTemplate.replace(/{{name}}/g, firstName) +
       signatureHTML;
 
-    let sentThreadId = null;
-
-    // ✅ Send as reply inside existing thread
-    if (replyInThread && threadId) {
-      const thread = GmailApp.getThreadById(threadId);
-      thread.reply("", {
-        htmlBody: body,
-        subject: subject
-      });
-      sentThreadId = threadId;
-    } 
-    // ✅ Send as brand new thread
-    else {
-      const message = GmailApp.sendEmail(email, subject, "", {
+    // ✅ SEND (threading is now purely cosmetic UX, not logic)
+    if (replyInThread) {
+      GmailApp.sendEmail(email, subject, "", {
         htmlBody: body
       });
-      sentThreadId = message.getThreadId();
+    } else {
+      GmailApp.sendEmail(email, subject, "", {
+        htmlBody: body
+      });
     }
-
-    // ✅ Store ONLY the most recent thread ID
-    contactsSheet.getRange(i + 1, 7).setValue(sentThreadId);
 
     // ✅ Advance step + update LastSent
     contactsSheet.getRange(i + 1, 4).setValue(step + 1);
@@ -88,18 +80,18 @@ function runSequences() {
   }
 }
 
-function hasRepliedToThread(threadId) {
-  const thread = GmailApp.getThreadById(threadId);
-  const messages = thread.getMessages();
+// ✅ REPLY DETECTION: ANY email from them since LastSent
+function hasRepliedSinceLastSend(email, lastSent) {
+  if (!lastSent) return false;
 
-  // If there's a message in this thread not from you, it's a reply
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    const from = msg.getFrom();
-    if (!from.includes(Session.getActiveUser().getEmail())) {
-      return true;
-    }
-  }
+  const afterDate = Utilities.formatDate(
+    new Date(lastSent),
+    Session.getScriptTimeZone(),
+    "yyyy/MM/dd"
+  );
 
-  return false;
+  const query = `from:${email} after:${afterDate}`;
+  const threads = GmailApp.search(query);
+
+  return threads.length > 0;
 }
