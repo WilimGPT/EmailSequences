@@ -20,10 +20,16 @@ function runSequences() {
     const step = row[3];
     const lastSent = row[4];
     const status = row[5];
-    const threadId = row[6]; // ✅ New column
+    const threadId = row[6];
+    const startAfter = row[7]; // ✅ NEW
 
     if (!email || !sequenceName || !step) continue;
     if (status !== "Active") continue;
+
+    // ✅ HARD GATE: do not allow sequence to start before StartAfter
+    if (startAfter && new Date(startAfter) > now) {
+      continue;
+    }
 
     const sequenceRow = sequences.find(
       r => r[0] === sequenceName && r[1] === step
@@ -31,18 +37,19 @@ function runSequences() {
 
     if (!sequenceRow) continue;
 
-    const delayMin = Number(sequenceRow[3]); // DelayMin
+    const delayMin = Number(sequenceRow[3]);
     const subjectTemplate = sequenceRow[4];
     const bodyTemplate = sequenceRow[5];
-    const replyInThread = sequenceRow[6] === true; // ✅ Checkbox
+    const replyInThread = sequenceRow[6] === true;
 
+    // ✅ Delay logic (based only on LastSent)
     if (lastSent) {
       const last = new Date(lastSent);
       const diffMin = (now - last) / (1000 * 60);
       if (diffMin < delayMin) continue;
     }
 
-    // ✅ Check for reply ONLY on the stored most recent thread
+    // ✅ Reply detection ONLY on the latest thread
     if (threadId && hasRepliedToThread(threadId)) {
       contactsSheet.getRange(i + 1, 6).setValue("Replied");
       continue;
@@ -55,7 +62,7 @@ function runSequences() {
 
     let sentThreadId = null;
 
-    // ✅ Send as reply in-thread
+    // ✅ Send as reply inside existing thread
     if (replyInThread && threadId) {
       const thread = GmailApp.getThreadById(threadId);
       thread.reply("", {
@@ -69,28 +76,30 @@ function runSequences() {
       const message = GmailApp.sendEmail(email, subject, "", {
         htmlBody: body
       });
-      sentThreadId = message.getThreadId(); // ✅ Capture new thread
+      sentThreadId = message.getThreadId();
     }
 
-    // ✅ Persist latest thread
+    // ✅ Store ONLY the most recent thread ID
     contactsSheet.getRange(i + 1, 7).setValue(sentThreadId);
 
-    // ✅ Advance step + timestamp
+    // ✅ Advance step + update LastSent
     contactsSheet.getRange(i + 1, 4).setValue(step + 1);
     contactsSheet.getRange(i + 1, 5).setValue(new Date());
   }
 }
 
-// ✅ Only checks for replies inside ONE specific thread
 function hasRepliedToThread(threadId) {
   const thread = GmailApp.getThreadById(threadId);
   const messages = thread.getMessages();
 
+  // If there's a message in this thread not from you, it's a reply
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (!msg.isDraft() && msg.isInInbox() && msg.getFrom()) {
-      return true; // ✅ A reply exists
+    const from = msg.getFrom();
+    if (!from.includes(Session.getActiveUser().getEmail())) {
+      return true;
     }
   }
+
   return false;
 }
