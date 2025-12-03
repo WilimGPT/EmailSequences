@@ -10,8 +10,10 @@ function runSequences() {
   const signatureHTML = settingsSheet.getRange("A2").getValue();
 
   const now = new Date();
+  console.log("=== runSequences at " + now.toISOString() + " ===");
 
   for (let i = 1; i < contacts.length; i++) {
+    const rowIndex = i + 1; // Sheet row number
     const row = contacts[i];
 
     const email = row[0];
@@ -20,78 +22,140 @@ function runSequences() {
     const step = row[3];
     const lastSent = row[4];
     const status = row[5];
-    const startAfter = row[6]; // ⬅️ Now column G after removing ThreadId
+    const startAfter = row[6];
 
-    if (!email || !sequenceName || !step) continue;
-    if (status !== "Active") continue;
+    console.log(
+      `--- Row ${rowIndex} --- Email=${email}, FirstName=${firstName}, Sequence=${sequenceName}, Step=${step}, Status=${status}, LastSent=${lastSent}, StartAfter=${startAfter}`
+    );
 
-    // ✅ HARD GATE: do not allow sequence to start before StartAfter
-    if (startAfter && new Date(startAfter) > now) {
+    if (!email || !sequenceName || !step) {
+      console.log("Missing email/sequence/step. Skipping row.");
       continue;
+    }
+
+    if (status !== "Active") {
+      console.log(`Status is '${status}', not 'Active'. Skipping row.`);
+      continue;
+    }
+
+    // HARD GATE: do not allow sequence to start before StartAfter
+    if (startAfter) {
+      const startAfterDate = new Date(startAfter);
+      console.log(`StartAfterDate=${startAfterDate.toISOString()}`);
+      if (startAfterDate > now) {
+        console.log("StartAfter is in the future. Skipping row.");
+        continue;
+      }
     }
 
     const sequenceRow = sequences.find(
       r => r[0] === sequenceName && r[1] === step
     );
 
-    // ✅ NO MORE STEPS = COMPLETED (we’ll wire notification later, as discussed)
     if (!sequenceRow) {
-      contactsSheet.getRange(i + 1, 6).setValue("Completed");
+      console.log(
+        `No sequence row for Sequence='${sequenceName}', Step=${step}. Marking as Completed.`
+      );
+      contactsSheet.getRange(rowIndex, 6).setValue("Completed");
       continue;
     }
 
     const delayMin = Number(sequenceRow[3]);
     const subjectTemplate = sequenceRow[4];
     const bodyTemplate = sequenceRow[5];
-    const replyInThread = sequenceRow[6] === true;
 
-    // ✅ Delay logic (based only on LastSent)
+    console.log(
+      `Found sequence row. DelayMin=${delayMin}, SubjectTemplate="${subjectTemplate}"`
+    );
+
+    // Delay logic (based only on LastSent)
     if (lastSent) {
       const last = new Date(lastSent);
       const diffMin = (now - last) / (1000 * 60);
-      if (diffMin < delayMin) continue;
+      console.log(
+        `LastSent=${last.toISOString()}, diffMin=${diffMin.toFixed(
+          2
+        )}, required delay=${delayMin}`
+      );
+      if (diffMin < delayMin) {
+        console.log("Delay not yet satisfied. Skipping row.");
+        continue;
+      }
+    } else {
+      console.log("No LastSent value. Treating as first send for this contact.");
     }
 
-    // ✅ SAFE REPLY DETECTION: ANY email since LastSent stops the sequence
-    if (hasRepliedSinceLastSend(email, lastSent)) {
-      contactsSheet.getRange(i + 1, 6).setValue("Replied");
+    // REPLY DETECTION: any email from them since LastSent
+    const replied = hasRepliedSinceLastSend(email, lastSent);
+    console.log(`hasRepliedSinceLastSend(${email}) = ${replied}`);
+
+    if (replied) {
+      console.log("Reply detected. Marking status as Replied and skipping further sends.");
+      contactsSheet.getRange(rowIndex, 6).setValue("Replied");
       continue;
     }
 
-    const subject = subjectTemplate.replace(/{{name}}/g, firstName);
+    const subject = subjectTemplate.replace(/{{name}}/g, firstName || "");
     const body =
-      bodyTemplate.replace(/{{name}}/g, firstName) +
+      bodyTemplate.replace(/{{name}}/g, firstName || "") +
       signatureHTML;
 
-    // ✅ SEND (threading is now purely cosmetic UX, not logic)
-    if (replyInThread) {
-      GmailApp.sendEmail(email, subject, "", {
-        htmlBody: body
-      });
-    } else {
-      GmailApp.sendEmail(email, subject, "", {
-        htmlBody: body
-      });
-    }
+    console.log(`Sending email to ${email} with subject: "${subject}"`);
+    GmailApp.sendEmail(email, subject, "", {
+      htmlBody: body
+    });
 
-    // ✅ Advance step + update LastSent
-    contactsSheet.getRange(i + 1, 4).setValue(step + 1);
-    contactsSheet.getRange(i + 1, 5).setValue(new Date());
+    // Advance step + update LastSent
+    const newStep = Number(step) + 1;
+    contactsSheet.getRange(rowIndex, 4).setValue(newStep);
+    contactsSheet.getRange(rowIndex, 5).setValue(new Date());
+    console.log(`Advanced to Step=${newStep} and updated LastSent.`);
   }
+
+  console.log("=== runSequences finished ===");
 }
 
-// ✅ REPLY DETECTION: ANY email from them since LastSent
+// REPLY DETECTION: ANY email from them with date > lastSent
 function hasRepliedSinceLastSend(email, lastSent) {
-  if (!lastSent) return false;
+  if (!lastSent) {
+    console.log(`No lastSent for ${email}; cannot have replies yet.`);
+    return false;
+  }
 
-  const afterDate = Utilities.formatDate(
-    new Date(lastSent),
-    Session.getScriptTimeZone(),
-    "yyyy/MM/dd"
+  const last = new Date(lastSent);
+  console.log(
+    `Checking replies for ${email} since ${last.toISOString()}`
   );
 
-  const query = `from:${email} after:${afterDate}`;
+  const query = `from:${email}`;
   const threads = GmailApp.search(query);
+  console.log(
+    `Found ${threads.length} thread(s) from ${email} for reply check.`
+  );
 
-  return threads.length > 0;
+  for (let t = 0; t < threads.length; t++) {
+    const thread = threads[t];
+    const messages = thread.getMessages();
+    console.log(` Thread ${t} has ${messages.length} message(s).`);
+
+    for (let m = 0; m < messages.length; m++) {
+      const msg = messages[m];
+      const from = msg.getFrom();
+      const date = msg.getDate();
+
+      console.log(
+        `  Msg ${m}: from="${from}", date=${date.toISOString()}`
+      );
+
+      if (from && from.indexOf(email) !== -1 && date > last) {
+        console.log(
+          `  -> Treating this as a reply (date > lastSent).`
+        );
+        return true;
+      }
+    }
+  }
+
+  console.log(`No replies found for ${email} since ${last.toISOString()}.`);
+  return false;
 }
