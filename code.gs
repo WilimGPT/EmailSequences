@@ -1,253 +1,296 @@
 function runSequences() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const now = new Date();
 
-  const contactsSheet = ss.getSheetByName("Contacts");
-  const sequencesSheet = ss.getSheetByName("Sequences");
-  const settingsSheet = ss.getSheetByName("Settings");
+  // 🚫 HARD WEEKEND BLOCK — do NOTHING on Saturdays & Sundays
+  const todayDay = now.getDay(); // 0 = Sunday, 6 = Saturday
+  if (todayDay === 0 || todayDay === 6) {
+    console.log("Weekend detected. runSequences exited without processing.");
+    return;
+  }
+
+  let ss, contactsSheet, sequencesSheet, settingsSheet;
+
+  // ✅ HARD FATAL GUARD — missing core sheets
+  try {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+    contactsSheet = ss.getSheetByName("Contacts");
+    sequencesSheet = ss.getSheetByName("Sequences");
+    settingsSheet = ss.getSheetByName("Settings");
+
+    if (!contactsSheet || !sequencesSheet || !settingsSheet) {
+      throw new Error("One or more required sheets are missing.");
+    }
+  } catch (err) {
+    console.error("FATAL: Core sheets missing.", err);
+    return;
+  }
 
   const contacts = contactsSheet.getDataRange().getValues();
   const sequences = sequencesSheet.getDataRange().getValues();
   const signatureHTML = settingsSheet.getRange("A2").getValue();
 
-  const now = new Date();
   console.log("=== runSequences at " + now.toISOString() + " ===");
 
   for (let i = 1; i < contacts.length; i++) {
-    const rowIndex = i + 1; // Sheet row number
-    const row = contacts[i];
+    const rowIndex = i + 1;
 
-    const email = row[0];
-    const firstName = row[1];
-    const sequenceName = row[2];
-    const step = row[3];
-    const lastSent = row[4];
-    const status = row[5];
-    const startAfter = row[6];
+    try {
+      const row = contacts[i];
 
-    console.log(
-      `--- Row ${rowIndex} --- Email=${email}, FirstName=${firstName}, Sequence=${sequenceName}, Step=${step}, Status=${status}, LastSent=${lastSent}, StartAfter=${startAfter}`
-    );
+      const email = row[0];
+      const firstName = row[1];
+      const sequenceName = row[2];
+      const step = Number(row[3]);
+      const lastSent = row[4];
+      const status = row[5];
+      const startAfter = row[6];
 
-    if (!email || !sequenceName || !step) {
-      console.log("Missing email/sequence/step. Skipping row.");
-      continue;
-    }
+      console.log(
+        `--- Row ${rowIndex} --- ${email} | ${sequenceName} | Step ${step} | Status ${status}`
+      );
 
-    if (status !== "Active") {
-      console.log(`Status is '${status}', not 'Active'. Skipping row.`);
-      continue;
-    }
+      // ✅ BASIC VALIDATION
+      if (!email || !sequenceName || !step) {
+        throw new Error("Missing required fields: Email, Sequence or Step.");
+      }
 
-    // HARD GATE: do not allow sequence to start before StartAfter
-    if (startAfter) {
-      const startAfterDate = new Date(startAfter);
-      console.log(`StartAfterDate=${startAfterDate.toISOString()}`);
-      if (startAfterDate > now) {
-        console.log("StartAfter is in the future. Skipping row.");
+      if (status !== "Active") continue;
+
+      // ✅ StartAfter gate
+      if (startAfter) {
+        const startAfterDate = new Date(startAfter);
+        if (isNaN(startAfterDate.getTime())) {
+          throw new Error("Invalid StartAfter date.");
+        }
+
+        if (startAfterDate > now) continue;
+      }
+
+      // ✅ Find sequence row safely
+      const sequenceRow = sequences.find(
+        r => r[0] === sequenceName && Number(r[1]) === step
+      );
+
+      if (!sequenceRow) {
+        console.log("No more steps → marking Completed");
+        contactsSheet.getRange(rowIndex, 6).setValue("Completed");
         continue;
       }
-    }
 
-    const sequenceRow = sequences.find(
-      r => r[0] === sequenceName && r[1] === step
-    );
+      const delayMin = Number(sequenceRow[3]);
+      if (isNaN(delayMin)) {
+        throw new Error("DelayMin is not a valid number.");
+      }
 
-    if (!sequenceRow) {
-      console.log(
-        `No sequence row for Sequence='${sequenceName}', Step=${step}. Marking as Completed.`
-      );
-      contactsSheet.getRange(rowIndex, 6).setValue("Completed");
-      continue;
-    }
+      const subjectTemplate = sequenceRow[4];
+      const bodyTemplate = sequenceRow[5];
 
-    const delayMin = Number(sequenceRow[3]);
-    const subjectTemplate = sequenceRow[4];
-    const bodyTemplate = sequenceRow[5];
+      // ✅ OPTIMISED BUSINESS-TIME DELAY LOGIC (SAFE)
+      if (lastSent) {
+        const lastSentDate = new Date(lastSent);
+        if (isNaN(lastSentDate.getTime())) {
+          throw new Error("LastSent is not a valid date.");
+        }
 
-    console.log(
-      `Found sequence row. DelayMin=${delayMin}, SubjectTemplate="${subjectTemplate}"`
-    );
+        const businessMinutes = getBusinessMinutesBetween(
+          lastSentDate,
+          now
+        );
 
-    // Delay logic (based only on LastSent)
-    if (lastSent) {
-      const last = new Date(lastSent);
-      const diffMin = (now - last) / (1000 * 60);
-      console.log(
-        `LastSent=${last.toISOString()}, diffMin=${diffMin.toFixed(
-          2
-        )}, required delay=${delayMin}`
-      );
-      if (diffMin < delayMin) {
-        console.log("Delay not yet satisfied. Skipping row.");
+        console.log(
+          `Business minutes elapsed: ${businessMinutes} / required: ${delayMin}`
+        );
+
+        if (businessMinutes < delayMin) continue;
+      }
+
+      // ✅ SAFE REPLY DETECTION
+      let replied = false;
+      try {
+        replied = hasRepliedSinceLastSend(email, lastSent);
+      } catch (replyErr) {
+        console.warn("Reply detection failed for row " + rowIndex, replyErr);
+      }
+
+      if (replied) {
+        console.log("Reply detected → marking Replied");
+        contactsSheet.getRange(rowIndex, 6).setValue("Replied");
         continue;
       }
-    } else {
-      console.log("No LastSent value. Treating as first send for this contact.");
+
+      const subject = subjectTemplate.replace(/{{name}}/g, firstName || "");
+      const body =
+        bodyTemplate.replace(/{{name}}/g, firstName || "") +
+        signatureHTML;
+
+      console.log(`✅ Sending: ${email} → "${subject}"`);
+
+      // ✅ SAFE SEND
+      try {
+        GmailApp.sendEmail(email, subject, "", {
+          htmlBody: body
+        });
+      } catch (mailErr) {
+        throw new Error("Gmail send failed: " + mailErr.message);
+      }
+
+      contactsSheet.getRange(rowIndex, 4).setValue(step + 1);
+      contactsSheet.getRange(rowIndex, 5).setValue(new Date());
+
+    } catch (rowErr) {
+      console.error(`❌ Row ${rowIndex} failed:`, rowErr.message);
+
+      // ✅ VISUAL ERROR FLAG (turn entire row red)
+      try {
+        contactsSheet
+          .getRange(rowIndex, 1, 1, contacts[0].length)
+          .setFontColor("red");
+
+        // ✅ Optional: mark Status as Error
+        contactsSheet.getRange(rowIndex, 6).setValue("Error");
+      } catch (flagErr) {
+        console.error("Failed to flag row visually:", flagErr.message);
+      }
     }
-
-    // REPLY DETECTION: any email from them since LastSent
-    const replied = hasRepliedSinceLastSend(email, lastSent);
-    console.log(`hasRepliedSinceLastSend(${email}) = ${replied}`);
-
-    if (replied) {
-      console.log("Reply detected. Marking status as Replied and skipping further sends.");
-      contactsSheet.getRange(rowIndex, 6).setValue("Replied");
-      continue;
-    }
-
-    const subject = subjectTemplate.replace(/{{name}}/g, firstName || "");
-    const body =
-      bodyTemplate.replace(/{{name}}/g, firstName || "") +
-      signatureHTML;
-
-    console.log(`Sending email to ${email} with subject: "${subject}"`);
-    GmailApp.sendEmail(email, subject, "", {
-      htmlBody: body
-    });
-
-    // Advance step + update LastSent
-    const newStep = Number(step) + 1;
-    contactsSheet.getRange(rowIndex, 4).setValue(newStep);
-    contactsSheet.getRange(rowIndex, 5).setValue(new Date());
-    console.log(`Advanced to Step=${newStep} and updated LastSent.`);
   }
 
   console.log("=== runSequences finished ===");
 }
 
-// REPLY DETECTION: ANY email from them with date > lastSent
-function hasRepliedSinceLastSend(email, lastSent) {
-  if (!lastSent) {
-    console.log(`No lastSent for ${email}; cannot have replies yet.`);
-    return false;
+
+function getBusinessMinutesBetween(start, end) {
+  const totalMinutes = Math.floor((end - start) / 60000);
+  const totalDays = Math.floor(totalMinutes / 1440);
+  const fullWeeks = Math.floor(totalDays / 7);
+
+  let weekendDays = fullWeeks * 2;
+
+  const remainingDays = totalDays % 7;
+  const startDay = start.getDay(); // 0 = Sun, 6 = Sat
+
+  for (let i = 1; i <= remainingDays; i++) {
+    const day = (startDay + i) % 7;
+    if (day === 0 || day === 6) {
+      weekendDays++;
+    }
   }
 
+  const weekendMinutes = weekendDays * 1440;
+  const businessMinutes = totalMinutes - weekendMinutes;
+
+  return Math.max(0, businessMinutes);
+}
+
+
+function hasRepliedSinceLastSend(email, lastSent) {
+  if (!lastSent) return false;
+
   const last = new Date(lastSent);
-  console.log(
-    `Checking replies for ${email} since ${last.toISOString()}`
-  );
+  if (isNaN(last.getTime())) {
+    throw new Error("Invalid LastSent date in reply detection.");
+  }
 
   const query = `from:${email}`;
   const threads = GmailApp.search(query);
-  console.log(
-    `Found ${threads.length} thread(s) from ${email} for reply check.`
-  );
 
   for (let t = 0; t < threads.length; t++) {
-    const thread = threads[t];
-    const messages = thread.getMessages();
-    console.log(` Thread ${t} has ${messages.length} message(s).`);
+    const messages = threads[t].getMessages();
 
     for (let m = 0; m < messages.length; m++) {
       const msg = messages[m];
       const from = msg.getFrom();
       const date = msg.getDate();
 
-      console.log(
-        `  Msg ${m}: from="${from}", date=${date.toISOString()}`
-      );
-
       if (from && from.indexOf(email) !== -1 && date > last) {
-        console.log(
-          `  -> Treating this as a reply (date > lastSent).`
-        );
         return true;
       }
     }
   }
 
-  console.log(`No replies found for ${email} since ${last.toISOString()}.`);
   return false;
 }
 
-function sendDailySummaryAndArchive() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const contactsSheet = ss.getSheetByName("Contacts");
-  const historySheet = ss.getSheetByName("History");
 
-  const data = contactsSheet.getDataRange().getValues();
-  if (data.length <= 1) {
-    console.log("No data rows in Contacts. Nothing to archive.");
+function sendDailySummaryAndArchive() {
+  let ss, contactsSheet, historySheet;
+
+  try {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+    contactsSheet = ss.getSheetByName("Contacts");
+    historySheet = ss.getSheetByName("History");
+
+    if (!contactsSheet || !historySheet) {
+      throw new Error("Missing Contacts or History sheet.");
+    }
+  } catch (fatalErr) {
+    console.error("FATAL SUMMARY FAILURE:", fatalErr.message);
     return;
   }
+
+  const data = contactsSheet.getDataRange().getValues();
+  if (data.length <= 1) return;
 
   const headers = data[0];
   const now = new Date();
   const timezone = Session.getScriptTimeZone();
   const dateLabel = Utilities.formatDate(now, timezone, "yyyy-MM-dd");
 
-  console.log("=== sendDailySummaryAndArchive for " + dateLabel + " ===");
-
-  // Ensure History has headers (once)
   if (historySheet.getLastRow() === 0) {
-    const historyHeaders = headers.concat(["ClosedAt"]);
-    historySheet.appendRow(historyHeaders);
-    console.log("Initialized History sheet headers.");
+    historySheet.appendRow(headers.concat(["ClosedAt"]));
   }
 
   const rowsToArchive = [];
   const rowIndexesToDelete = [];
 
-  // Scan Contacts for Completed / Replied
   for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    const status = row[5]; // Status column F
+    try {
+      const row = data[i];
+      const status = row[5];
 
-    if (status === "Completed" || status === "Replied") {
-      rowsToArchive.push(row.concat([now])); // add ClosedAt
-      rowIndexesToDelete.push(i + 1);        // sheet row index
+      if (status === "Completed" || status === "Replied") {
+        rowsToArchive.push(row.concat([now]));
+        rowIndexesToDelete.push(i + 1);
+      }
+
+    } catch (archErr) {
+      console.error("Archive scan failed on row", i + 1, archErr.message);
     }
   }
 
-  if (rowsToArchive.length === 0) {
-    console.log("No Completed/Replied rows to archive today.");
-    return; // nothing to email, nothing to move
-  }
+  if (rowsToArchive.length === 0) return;
 
-  // Append to History
-  const startRow = historySheet.getLastRow() + 1;
   historySheet
-    .getRange(startRow, 1, rowsToArchive.length, rowsToArchive[0].length)
+    .getRange(
+      historySheet.getLastRow() + 1,
+      1,
+      rowsToArchive.length,
+      rowsToArchive[0].length
+    )
     .setValues(rowsToArchive);
 
-  console.log("Archived " + rowsToArchive.length + " row(s) to History.");
-
-  // Build summary email
   const userEmail = Session.getActiveUser().getEmail();
-  let body = "";
-  body += "Daily sequence summary for " + dateLabel + "\n\n";
-  body += "The following contacts finished or replied and were moved to the History sheet:\n\n";
+  let body = "Daily sequence summary for " + dateLabel + "\n\n";
 
   rowsToArchive.forEach((r, idx) => {
-    const email = r[0];
-    const firstName = r[1];
-    const sequenceName = r[2];
-    const step = r[3];
-    const lastSent = r[4];
-    const status = r[5];
-    const closedAt = r[7];
-
     body +=
-      (idx + 1) + ". " +
-      `Name: ${firstName}\n` +
-      `   Email: ${email}\n` +
-      `   Sequence: ${sequenceName}\n` +
-      `   Last Step: ${step}\n` +
-      `   Status: ${status}\n` +
-      `   LastSent: ${lastSent}\n` +
-      `   ClosedAt: ${closedAt}\n\n`;
+      `${idx + 1}. ${r[1]} (${r[0]}) | ${r[2]} | Status: ${r[5]}\n`;
   });
 
-  const subject = "Daily sequence summary (" + dateLabel + ")";
-  GmailApp.sendEmail(userEmail, subject, body);
-  console.log("Sent summary email to " + userEmail);
+  try {
+    GmailApp.sendEmail(
+      userEmail,
+      "Daily sequence summary (" + dateLabel + ")",
+      body
+    );
+  } catch (mailErr) {
+    console.error("Summary email failed:", mailErr.message);
+  }
 
-  // Delete from Contacts (bottom-up to avoid index shift)
   rowIndexesToDelete.sort((a, b) => b - a).forEach(rowIndex => {
-    contactsSheet.deleteRow(rowIndex);
+    try {
+      contactsSheet.deleteRow(rowIndex);
+    } catch (delErr) {
+      console.error("Delete failed on row", rowIndex, delErr.message);
+    }
   });
-
-  console.log("Deleted " + rowIndexesToDelete.length + " row(s) from Contacts.");
-  console.log("=== sendDailySummaryAndArchive finished ===");
 }
-
